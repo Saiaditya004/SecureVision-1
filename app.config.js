@@ -55,9 +55,5 @@ export default {
     experiments: {
       typedRoutes: true,
     },
-    extra: {
-      // API Configuration - change this to your backend server address
-      apiBaseUrl: process.env.API_BASE_URL || "http://192.168.0.7:5000",
-    },
   },
 };

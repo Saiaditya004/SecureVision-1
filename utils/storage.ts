@@ -1,6 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as MediaLibrary from 'expo-media-library';
 
+
+const API_BASE_URL = 'http://192.168.0.7:5000';
 /**
  * Sealed image item schema for manifest signing storage.
  */
@@ -13,14 +15,24 @@ export type SealedImageItem = {
   sealed_at?: string; // ISO string when item was stored
 };
 
-// Storage key for sealed items
+// Keep local storage key for offline fallback
 const STORAGE_KEY = 'sealed_items';
+const USER_ID_KEY = 'user_id';
 
 /**
- * Save a sealed image item.
- * Ensures deduplication by imageUri - if an item with the same imageUri exists, it will be replaced.
- *
- * @param item SealedImageItem to save
+ * Get or create a unique user ID for this device
+ */
+async function getUserId(): Promise<string> {
+  let userId = await AsyncStorage.getItem(USER_ID_KEY);
+  if (!userId) {
+    userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    await AsyncStorage.setItem(USER_ID_KEY, userId);
+  }
+  return userId;
+}
+
+/**
+ * Save sealed item to BOTH server and local storage (for offline support)
  */
 export async function saveSealedItem(item: SealedImageItem): Promise<void> {
   // Input validation
@@ -34,63 +46,133 @@ export async function saveSealedItem(item: SealedImageItem): Promise<void> {
     throw new Error('saveSealedItem: manifest_hash must be a non-empty string');
   }
   
-  const list = await listSealedItems();
   const sealedAt = item.sealed_at || new Date().toISOString();
+  const itemWithTimestamp = { ...item, sealed_at: sealedAt };
+  
+  // Save to server first
+  try {
+    const userId = await getUserId();
+    const response = await fetch(`${API_BASE_URL}/api/sealed-items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: userId,
+        item: itemWithTimestamp
+      })
+    });
+    
+    if (!response.ok) {
+      console.warn('Server save failed, falling back to local storage');
+    }
+  } catch (error) {
+    console.error('Server save error:', error);
+    // Continue to local save even if server fails
+  }
+  
+  // Also save locally for offline access
+  const list = await listSealedItems();
   const next: SealedImageItem[] = [
-    { ...item, sealed_at: sealedAt }, 
-    ...list.filter(i => i.imageUri !== item.imageUri)
+    itemWithTimestamp,
+    ...list.filter(i => i.imageHash !== item.imageHash)
   ];
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }
 
 /**
- * List all sealed image items.
- * Returns items sorted by sealed_at (newest first).
+ * List sealed items from SERVER first, fallback to local storage
  */
 export async function listSealedItems(): Promise<SealedImageItem[]> {
+  try {
+    const userId = await getUserId();
+    const response = await fetch(
+      `${API_BASE_URL}/api/sealed-items?user_id=${encodeURIComponent(userId)}`
+    );
+    
+    if (response.ok) {
+      const data = await response.json();
+      return data.items || [];
+    }
+  } catch (error) {
+    console.warn('Server list failed, using local storage:', error);
+  }
+  
+  // Fallback to local storage
   const raw = await AsyncStorage.getItem(STORAGE_KEY);
   return raw ? JSON.parse(raw) : [];
 }
 
+
+export async function getSealedItemFromServer(imageHash: string): Promise<SealedImageItem | null> {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/lookup-by-hash?image_hash=${encodeURIComponent(imageHash)}`
+    );
+    const data = await response.json();
+    
+    if (data.found) {
+      return {
+        imageUri: '', // No local URI for remote lookups
+        imageHash: imageHash,
+        manifest_url: data.manifest_url,
+        manifest_hash: `sha256:${data.manifest_hash}`,
+        signed_manifest: data.manifest,
+      };
+    }
+    return null;
+  } catch (error) {
+    console.error('Server lookup failed:', error);
+    return null;
+  }
+}
+
 /**
- * Get a single sealed image item by imageUri or imageHash.
- * First tries exact URI match, then falls back to hash-based lookup.
- * This allows verification of images even when selected from gallery with different URIs.
- *
- * @param imageUri The image URI to search for
- * @param imageHash Optional: SHA-256 hash of the image to search by content
- * @returns Matching item or null
+ * Get sealed item - tries local first, then server
  */
 export async function getSealedItem(imageUri: string, imageHash?: string): Promise<SealedImageItem | null> {
-  const items = await listSealedItems();
+  const items = await listSealedItems(); // Now queries server
   
-  // First try exact URI match (fastest)
+  // Try exact URI match
   const exactMatch = items.find(i => i.imageUri === imageUri);
   if (exactMatch) return exactMatch;
   
-  // If hash provided, try matching by content hash
-  // This handles cases where the same image has different URIs (e.g., from gallery vs filesystem)
+  // Try hash match
   if (imageHash) {
     const hashMatch = items.find(i => i.imageHash === imageHash);
     if (hashMatch) return hashMatch;
+    
+    // Final fallback: direct server lookup
+    const serverMatch = await getSealedItemFromServer(imageHash);
+    if (serverMatch) return serverMatch;
   }
   
   return null;
 }
 
 /**
- * Delete a sealed image item by its imageUri.
- * Returns the removed item if found, otherwise null.
- *
- * @param imageUri The image URI of the item to delete
+ * Delete sealed item from BOTH server and local storage
  */
 export async function deleteSealedItem(imageUri: string): Promise<SealedImageItem | null> {
   const list = await listSealedItems();
-  const idx = list.findIndex(i => i.imageUri === imageUri);
-  if (idx === -1) return null;
-  const [removed] = list.splice(idx, 1);
-  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-  return removed ?? null;
+  const item = list.find(i => i.imageUri === imageUri);
+  
+  if (!item || !item.imageHash) return null;
+  
+  // Delete from server
+  try {
+    const userId = await getUserId();
+    await fetch(
+      `${API_BASE_URL}/api/sealed-items/${encodeURIComponent(item.imageHash)}?user_id=${encodeURIComponent(userId)}`,
+      { method: 'DELETE' }
+    );
+  } catch (error) {
+    console.error('Server delete failed:', error);
+  }
+  
+  // Delete from local storage
+  const updated = list.filter(i => i.imageUri !== imageUri);
+  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+  
+  return item;
 }
 
 /**
