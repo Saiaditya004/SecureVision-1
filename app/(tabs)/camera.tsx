@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
+import { saveToGallery } from '../../utils/storage';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
 import * as Device from 'expo-device';
@@ -38,6 +39,13 @@ export default function CameraScreen() {
   const persisted = `${capturesDir}${Date.now()}.${ext}`;
   await FileSystem.copyAsync({ from: photo.uri, to: persisted });
   const photoPersisted = { ...photo, uri: persisted };
+      // Also save to device media library (Photos/Gallery) where possible
+      try {
+        await saveToGallery(persisted);
+      } catch (e) {
+        // non-fatal: continue to confirm screen regardless
+        console.warn('Failed saving to gallery', e);
+      }
 
       let coords: Location.LocationObject['coords'] | undefined;
       if (locGranted) {
