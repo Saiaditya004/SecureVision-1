@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as MediaLibrary from 'expo-media-library';
 
 
-const API_BASE_URL = 'http://192.168.0.7:5000';
+const API_BASE_URL = 'http://13.204.69.94:5000';
 /**
  * Sealed image item schema for manifest signing storage.
  */

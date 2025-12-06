@@ -6,6 +6,7 @@ import * as Device from 'expo-device';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { computeImageSha256 } from '../utils/hashImage';
 import { requestSigning } from '../utils/signingClient';
+import { detectAIImage, getDetectionLabel, getDetectionColor } from '../utils/aiDetection';
 
 // Detection result shape (local definition if not imported from a model module)
 export type DetectionResult = {
@@ -97,6 +98,8 @@ export default function ConfirmScreen() {
   const [sealing, setSealing] = useState(false);
   const [sealed, setSealed] = useState(false);
   const [manifestUrl, setManifestUrl] = useState<string | null>(null);
+  const [detectionResult, setDetectionResult] = useState<DetectionResult | null>(null);
+  const [detectingAI, setDetectingAI] = useState(false);
 
   const photo = useMemo(() => {
     try { return params.photo ? JSON.parse(params.photo) : null; } catch { return null; }
@@ -109,7 +112,7 @@ export default function ConfirmScreen() {
     return <View style={styles.center}><Text>Missing photo</Text></View>;
   }
 
-  // Pre-check if already sealed using storage
+  // Pre-check if already sealed using storage AND run AI detection
   React.useEffect(() => {
     (async () => {
       if (!photo?.uri) return;
@@ -120,15 +123,30 @@ export default function ConfirmScreen() {
           setManifestUrl(stored.manifest_url);
         }
       } catch {}
+
+      // Run AI detection automatically
+      if (!sealed) {
+        try {
+          setDetectingAI(true);
+          const result = await detectAIImage(photo.uri);
+          setDetectionResult(result);
+        } catch (error: any) {
+          console.warn('AI detection failed:', error);
+          // Non-fatal: user can still seal without AI detection
+        } finally {
+          setDetectingAI(false);
+        }
+      }
     })();
-  }, [photo?.uri]);
+  }, [photo?.uri, sealed]);
 
   const onSeal = async () => {
     const imageUri = photo?.uri;
     if (!imageUri) return;
     const doSeal = async () => {
       try {
-        await sealImageAndSave(imageUri, null, setSealing);
+        // Pass detection result to sealing function
+        await sealImageAndSave(imageUri, detectionResult, setSealing);
         const stored = await getSealedItem(imageUri);
         if (stored && 'manifest_url' in stored) {
           setManifestUrl(stored.manifest_url);
@@ -167,6 +185,32 @@ export default function ConfirmScreen() {
             <Text>Device ID: {metadata?.deviceId}</Text>
             <Text>Author: {metadata?.author}</Text>
           </View>
+
+          {/* AI Detection Results */}
+          <View style={styles.card}>
+            <Text style={styles.h2}>AI Detection</Text>
+            {detectingAI ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <ActivityIndicator size="small" />
+                <Text>Analyzing image...</Text>
+              </View>
+            ) : detectionResult ? (
+              <>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                  <View style={[styles.scoreBadge, { backgroundColor: getDetectionColor(detectionResult.score ?? 0) }]}>
+                    <Text style={styles.scoreText}>{((detectionResult.score ?? 0) * 100).toFixed(1)}%</Text>
+                  </View>
+                  <Text style={{ fontWeight: '600' }}>{detectionResult.label || getDetectionLabel(detectionResult.score ?? 0)}</Text>
+                </View>
+                {detectionResult.model_id && (
+                  <Text style={{ fontSize: 12, color: '#666', marginTop: 4 }}>Model: {detectionResult.model_id} v{detectionResult.model_version}</Text>
+                )}
+              </>
+            ) : (
+              <Text style={{ color: '#666' }}>AI detection unavailable</Text>
+            )}
+          </View>
+
           <TouchableOpacity
             accessibilityRole="button"
             accessibilityLabel="Seal and save provenance"
@@ -194,4 +238,6 @@ const styles = StyleSheet.create({
   h2: { fontSize: 16, fontWeight: '700', marginBottom: 4 },
   primary: { backgroundColor: '#ffd33d', paddingVertical: 14, borderRadius: 8, marginTop: 16, alignItems: 'center' },
   primaryText: { fontWeight: '800', color: '#000' },
+  scoreBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
+  scoreText: { color: '#fff', fontWeight: '700', fontSize: 14 },
 });

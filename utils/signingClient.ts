@@ -4,7 +4,6 @@
  * Uses the global fetch API available in Expo/React Native.
  */
 
-import Constants from 'expo-constants';
 
 export type SigningPayload = Record<string, unknown>;
 
@@ -15,7 +14,7 @@ export interface SigningResponse {
 }
 
 // Get API base URL from app config or fall back to localhost
-const BASE_URL = 'http://192.168.0.7:5000';
+const BASE_URL = 'http://13.204.69.94:5000';
 
 /**
  * Request the server to sign a manifest for the given payload.
